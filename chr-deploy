@@ -1,0 +1,147 @@
+#!/bin/bash
+# ==========================================================
+# proxmox-chr-deploy (universal, final)
+# Разворачивает MikroTik CHR в Proxmox VE.
+# Поддерживает файловые хранилища (local, dir) и LVM-thin (local-lvm).
+# ==========================================================
+
+set -e
+
+# ---------- Параметры ----------
+VM_ID="900"
+VM_NAME="MikroTik-CHR"
+CHR_VERSION="7.24.6"            # версия задаётся вручную
+STORAGE="${STORAGE:-}"          # если пусто — скрипт выберет сам
+BRIDGE="vmbr3"
+MEMORY="512"
+CORES="1"
+DISK_BUS="virtio0"              # шина диска: virtio0 / scsi0 / sata0
+ONBOOT="1"                      # автозапуск при старте хоста
+TEMP_DIR="/root/chr-temp"
+# -------------------------------
+
+echo ">>> Проверка окружения"
+
+if ! command -v wget &>/dev/null; then
+    echo "Ошибка: не найден wget. Установите: apt install wget"
+    exit 1
+fi
+if ! command -v unzip &>/dev/null && ! command -v python3 &>/dev/null; then
+    echo "Ошибка: нужен unzip или python3 для распаковки."
+    exit 1
+fi
+
+if qm status "${VM_ID}" &>/dev/null; then
+    echo "Ошибка: VM ID ${VM_ID} уже существует. Измените VM_ID."
+    exit 1
+fi
+
+# ---------- Определение хранилища ----------
+if [ -z "${STORAGE}" ]; then
+    echo ">>> STORAGE не задан, определяю автоматически..."
+
+    if pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "local-lvm"; then
+        STORAGE="local-lvm"
+    elif pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "local"; then
+        STORAGE="local"
+    else
+        STORAGE=$(pvesm status --content images 2>/dev/null | awk 'NR==2 {print $1}')
+        if [ -z "${STORAGE}" ]; then
+            echo "Ошибка: не найдено ни одного хранилища с поддержкой images."
+            echo "Проверьте: pvesm status"
+            exit 1
+        fi
+    fi
+fi
+
+if ! pvesm status 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${STORAGE}"; then
+    echo "Ошибка: хранилище '${STORAGE}' не найдено в pvesm status."
+    exit 1
+fi
+
+STORAGE_TYPE=$(pvesm status 2>/dev/null | awk -v s="${STORAGE}" '$1==s {print $2}')
+echo ">>> Использую хранилище: ${STORAGE} (тип: ${STORAGE_TYPE})"
+
+# ---------- Загрузка образа ----------
+mkdir -p "${TEMP_DIR}"
+cd "${TEMP_DIR}"
+
+CHR_ZIP="chr-${CHR_VERSION}.img.zip"
+CHR_IMG="chr-${CHR_VERSION}.img"
+
+if [ ! -f "${CHR_ZIP}" ]; then
+    echo ">>> Загрузка ${CHR_ZIP}..."
+    wget "https://download.mikrotik.com/routeros/${CHR_VERSION}/${CHR_ZIP}"
+else
+    echo ">>> Архив уже существует, пропускаю загрузку."
+fi
+
+if [ ! -f "${CHR_IMG}" ]; then
+    echo ">>> Распаковка..."
+    if command -v unzip &>/dev/null; then
+        unzip -o "${CHR_ZIP}"
+    else
+        python3 -m zipfile -e "${CHR_ZIP}" .
+    fi
+fi
+
+# ---------- Откат при ошибке ----------
+# Если что-то пойдёт не так после создания ВМ — удаляем её, чтобы не оставлять мусор.
+VM_CREATED=0
+cleanup() {
+    if [ "${VM_CREATED}" -eq 1 ]; then
+        echo ">>> Ошибка: откат — удаляю ВМ ${VM_ID}..."
+        qm stop "${VM_ID}" --skiplock 2>/dev/null || true
+        qm destroy "${VM_ID}" --purge --destroy-unreferenced-disks 2>/dev/null || true
+    fi
+}
+trap cleanup ERR
+
+# ---------- Создание ВМ ----------
+echo ">>> Создание ВМ ${VM_ID}..."
+qm create "${VM_ID}" \
+  --name "${VM_NAME}" \
+  --memory "${MEMORY}" \
+  --cores "${CORES}" \
+  --net0 virtio,bridge=${BRIDGE} \
+  --ostype other \
+  --scsihw virtio-scsi-pci \
+  --onboot "${ONBOOT}"
+VM_CREATED=1
+
+# ---------- Импорт диска ----------
+echo ">>> Импорт диска в ${STORAGE}..."
+qm importdisk "${VM_ID}" "${CHR_IMG}" "${STORAGE}"
+
+# ---------- Поиск именно импортированного тома ----------
+IMPORTED_KEY=""
+IMPORTED_DISK=""
+while IFS= read -r line; do
+    key="${line%%:*}"
+    val="${line#*: }"
+    if [[ "${val}" == *"vm-${VM_ID}-disk-"* ]]; then
+        IMPORTED_KEY="${key}"
+        IMPORTED_DISK="${val}"
+        break
+    fi
+done < <(qm config "${VM_ID}" | grep -E '^unused[0-9]+:')
+
+if [ -z "${IMPORTED_DISK}" ]; then
+    echo "Ошибка: не найден импортированный том vm-${VM_ID}-disk- в конфигурации."
+    echo "Текущая конфигурация:"
+    qm config "${VM_ID}"
+    exit 1
+fi
+
+# ---------- Подключение и загрузка ----------
+qm set "${VM_ID}" \
+  --"${DISK_BUS}" "${IMPORTED_DISK}" \
+  --boot "order=${DISK_BUS}"
+
+# Успех — снимаем trap, чтобы ВМ не удалилась
+trap - ERR
+
+echo ""
+echo ">>> Готово. ВМ ${VM_ID} создана."
+echo ">>> Запуск: qm start ${VM_ID}"
+echo ">>> Консоль: логин admin, пароль пустой."
