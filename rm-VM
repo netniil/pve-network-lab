@@ -1,0 +1,74 @@
+#!/bin/bash
+# ==========================================================
+# remove VM pve
+# Удаляет ВМ MikroTik CHR, созданную chr-deploy-pve.
+# Использование:
+#   ./destroy-chr.sh 900      # удалить конкретную ВМ по ID
+#   ./destroy-chr.sh          # удалить последнюю созданную ВМ
+# ==========================================================
+
+set -e
+
+# ---------- Параметры ----------
+VM_NAME_PREFIX="MikroTik-CHR"   # префикс имени, по которому ищем "наши" ВМ
+FORCE="0"                        # 1 = без подтверждения
+# -------------------------------
+
+# ---------- Определение VM_ID ----------
+if [ -n "$1" ]; then
+    VM_ID="$1"
+    echo ">>> Удаление ВМ с указанным ID: ${VM_ID}"
+else
+    echo ">>> ID не указан, ищу последнюю созданную ВМ..."
+
+    # Ищем ВМ, чьё имя начинается с префикса, берём с максимальным ID
+    VM_ID=$(qm list 2>/dev/null | awk -v p="${VM_NAME_PREFIX}" '
+        NR>1 && index($2, p)==1 {print $1}
+    ' | sort -n | tail -n1)
+
+    if [ -z "${VM_ID}" ]; then
+        echo "Ошибка: не найдено ни одной ВМ с именем, начинающимся на '${VM_NAME_PREFIX}'."
+        echo "Список ВМ:"
+        qm list
+        exit 1
+    fi
+    echo ">>> Найдена последняя ВМ: ${VM_ID}"
+fi
+
+# ---------- Проверка существования ----------
+if ! qm status "${VM_ID}" &>/dev/null; then
+    echo "Ошибка: ВМ ${VM_ID} не существует."
+    qm list
+    exit 1
+fi
+
+# ---------- Показ информации ----------
+VM_INFO=$(qm config "${VM_ID}" | grep -E '^(name|memory|cores|net[0-9]+|virtio[0-9]+|scsi[0-9]+|sata[0-9]+):' || true)
+echo ">>> Конфигурация ВМ ${VM_ID}:"
+echo "${VM_INFO}"
+
+# ---------- Подтверждение ----------
+if [ "${FORCE}" != "1" ]; then
+    read -r -p "Удалить ВМ ${VM_ID}? Это необратимо. [y/N] " answer
+    case "${answer}" in
+        [yY]|[yY][eE][sS]) ;;
+        *) echo "Отменено."; exit 0 ;;
+    esac
+fi
+
+# ---------- Остановка и удаление ----------
+echo ">>> Остановка ВМ ${VM_ID}..."
+qm stop "${VM_ID}" --skiplock 2>/dev/null || true
+
+# Ждём, пока ВМ реально остановится (макс. 10 сек)
+for i in $(seq 1 10); do
+    status=$(qm status "${VM_ID}" 2>/dev/null | awk '{print $2}')
+    [ "${status}" = "stopped" ] && break
+    sleep 1
+done
+
+echo ">>> Удаление ВМ ${VM_ID}..."
+qm destroy "${VM_ID}" --purge --destroy-unreferenced-disks
+
+echo ""
+echo ">>> Готово. ВМ ${VM_ID} удалена."
