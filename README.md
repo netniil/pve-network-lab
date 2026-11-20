@@ -9,8 +9,8 @@
 
 | Скрипт | Назначение |
 |--------|------------|
-| `chr/create-chr.sh` | Разворачивает MikroTik CHR: создаёт ВМ, качает образ, импортирует диск, настраивает загрузку. Работает с `local` и `local-lvm`. |
-| `chr/destroy-chr.sh` | Удаляет CHR-ВМ по ID или последнюю созданную. Чистит конфиг, диски, HA/репликацию. |
+| `chr/VM-deploy.sh` | Разворачивает MikroTik CHR: создаёт ВМ, качает образ, импортирует диск, настраивает загрузку. Работает с `local` и `local-lvm`. |
+| `chr/VM-remove.sh` | Удаляет CHR-ВМ по ID или последнюю созданную. Чистит конфиг, диски, HA/репликацию. |
 | `ubuntu/create-ubuntu.sh` | Разворачивает Ubuntu VM (в разработке). |
 | `network/` | Скрипты для настройки мостов, VLAN, NAT (в разработке). |
 | `vm/` | Общие утилиты управления ВМ: список, статус, бэкап (в разработке). |
@@ -28,13 +28,13 @@
 
 ```bash
 # создать CHR (автоопределение хранилища)
-./chr/create-chr.sh
+./chr/VM-deploy.sh
 
 # создать CHR с явным хранилищем
-STORAGE=local-lvm ./chr/create-chr.sh
+STORAGE=local-lvm ./chr/VM-deploy.sh
 
 # удалить конкретную ВМ
-./chr/destroy-chr.sh 900
+./chr/VM-remove.sh 900
 
 # удалить последнюю созданную CHR
-./chr/destroy-chr.sh
+./chr/VM-remove.sh
